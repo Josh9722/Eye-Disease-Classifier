@@ -1,0 +1,2 @@
+# Eye Disease Classifier
+This project aims to use machine learning and computer vision techniques to identify eye diseases in medical images and classify these images into 4 categories: cataract, diabetic retinopathy, glaucoma, and normal.
