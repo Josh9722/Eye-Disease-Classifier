@@ -238,92 +238,105 @@ def create_network(network):
     net = res.to(device)
     return net
 
-def train_model(net, train_loader, LR, epochs = 1, number_of_images = None):
+def train_model(net, train_loader, LR, epochs=1, number_of_images=None):
     loss_function = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(
-        net.parameters(),
-        lr=LR
-    )
+    optimizer = optim.Adam(net.parameters(), lr=LR)
+    
+    # Learning rate scheduler: Decay every 20 epochs by a factor of 0.5
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net = net.to(device)
+
     for epoch in range(epochs):
+        net.train()  # Set model to training mode
         sum_loss = 0.0
-        for i, data in enumerate(train_loader):
-            inputs, labels = data
-            if torch.cuda.is_available():
-                inputs, labels = Variable(inputs).cuda(), Variable(labels).cuda()
-            else:
-                inputs, labels = Variable(inputs).cpu(), Variable(labels).cpu()
-            optimizer.zero_grad()  #Make gradient to zero
-            outputs = net(inputs)  #Forward calculation 
-            loss = loss_function(outputs, labels)  #Get loss function
-            loss.backward()  #back propogation
-            optimizer.step()  #Update parameter.
-            # print(loss)
-            sum_loss += loss.item()
+        total_images = 0
+
+        for i, (inputs, labels) in enumerate(train_loader):
+            if number_of_images is not None and total_images >= number_of_images:
+                break  # Stop after processing the desired number of images
+
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()  # Reset gradients
+            outputs = net(inputs)  # Forward pass
+            loss = loss_function(outputs, labels)  # Calculate loss
+            loss.backward()  # Backpropagation
+            optimizer.step()  # Update model parameters
+
+            sum_loss += loss.item() * inputs.size(0)
+            total_images += inputs.size(0)
+
             if i % 100 == 99:
-                print('[%d,%d] loss:%.03f' %
-                      (epoch + 1, i + 1, sum_loss / 100))
+                print('[Epoch %d, Batch %d] Loss: %.03f' %
+                      (epoch + 1, i + 1, sum_loss / total_images))
                 sum_loss = 0.0
-            if number_of_images is None:
-                pass
-            else:
-                if i * train_loader.batch_size >= number_of_images:
-                    print ("Current Loss {}".format(sum_loss))
-                    break
+        
+        # Step the learning rate scheduler at the end of each epoch
+        scheduler.step()
+        
+        # Log the current learning rate and average loss for the epoch
+        current_lr = scheduler.get_last_lr()[0]
+        avg_loss = sum_loss / total_images
+        print(f"Epoch {epoch+1}/{epochs}, Avg Loss: {avg_loss:.4f}, LR: {current_lr:.6f}")
+
     return net
 
-def test_model(net, test_loader, number_of_images = None):
-    net.eval()  #Convert to test model
+
+def test_model(net, test_loader, number_of_images=None):
+    net.eval()  # Set the model to evaluation mode
     correct = 0
     total = 0
-    for i, data_test in enumerate(test_loader):
-        print (i)
-        images, labels = data_test
-        if torch.cuda.is_available():
-            images, labels = Variable(images).cuda(), Variable(labels).cuda()
-        else:
-            images, labels = Variable(images).cpu(), Variable(labels).cpu()
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net = net.to(device)
+    
+    for i, (images, labels) in enumerate(test_loader):
+        if number_of_images is not None and total >= number_of_images:
+            break  # Stop if we've tested enough images
+
+        print(f"Batch {i + 1}")
+        
+        images, labels = images.to(device), labels.to(device)
         output_test = net(images)
         _, predicted = torch.max(output_test, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum()
-        if number_of_images is None:
-            pass
-        else:
-            if i * test_loader.batch_size >= number_of_images:
-                print("correct1: ", correct.item())
-                print("Test acc: {0}".format(correct.item() /
-                                     ((i+1) * test_loader.batch_size)))
-                break
-    if number_of_images is None:
-        print("correct1: ", correct.item())
-        print("Test acc: {0}".format(correct.item() /
-                                     len(test_loader)))
+        
+        batch_size = labels.size(0)
+        remaining_images = min(batch_size, number_of_images - total) if number_of_images else batch_size
+        
+        # Compare only the needed number of predictions
+        batch_correct = (predicted[:remaining_images] == labels[:remaining_images]).sum().item()
+        correct += batch_correct
+        total += remaining_images
+    
+    print(f"Correct predictions: {correct}")
+    print(f"Test accuracy: {correct / total:.4f}")
 
-def predict_image(net, input_image, objective_list, num_of_prediction = 1):
+
+
+def predict_image(net, input_image, objective_list, num_of_prediction=1):
     net.eval()
-    objective_list = np.array(objective_list)
-    if isinstance(input_image, torch.utils.data.DataLoader):
-        images, labels = view_datasets(input_image, objective_list)
-        if torch.cuda.is_available():
-            net = net.cuda()
-            images = Variable(images).cuda()
-        else:
-            images = Variable(images).cpu()
-    else:
-        input_image = input_image.unsqueeze(-3)
-        img = torchvision.utils.make_grid(input_image)
-        img = img.numpy().transpose(1, 2, 0)
-        plt.imshow(img)
-        if torch.cuda.is_available():
-            net = net.cuda()
-            images = Variable(input_image).cuda()
-        else:
-            images = Variable(input_image).cpu()
-    print (images)
-    output_test = net(images)
-    _, predicted = torch.max(output_test, 1)
 
-    print ("The predict result is {}".format(objective_list[predicted.tolist()]))
+    # Create reverse mapping for class indices to class labels
+    idx_to_class = {v: k for k, v in objective_list.items()}
+
+    # Ensure input_image has the correct shape
+    if len(input_image.shape) == 3:  # If (C, H, W), add batch dimension
+        input_image = input_image.unsqueeze(0)
+
+    # Move input and model to appropriate device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net = net.to(device)
+    images = input_image.to(device)
+
+    output_test = net(images)
+    _, predicted = torch.topk(output_test, num_of_prediction)  # Get top predictions
+
+    # Map predicted indices to class labels
+    predicted_classes = [idx_to_class[idx.item()] for idx in predicted[0]]
+
+    print(f"Predicted result(s): {predicted_classes}")
+    print(f"Confidence: {torch.softmax(output_test, dim=1)[0][predicted[0]]}")
 
 
 
